@@ -1,5 +1,97 @@
 # Changelog - ML WooCommerce Practitioners
 
+## Version 2.1.3 - November 29, 2025
+
+### 🔧 Critical Bug Fix - WooCommerce Admin Access Restored
+
+**Problem:**
+Version 2.1.1 was blocking access to WooCommerce admin pages with "Sorry, you are not allowed to access this page" error. Users were being redirected to the setup wizard login page.
+
+**Root Cause:**
+The plugin was using overly aggressive filters to disable the WooCommerce setup wizard:
+- `woocommerce_admin_disabled` → This completely disabled WooCommerce's admin React app
+- `woocommerce_admin_features` returning empty array → Broke admin features
+
+These filters don't just hide the wizard - they disable WooCommerce's entire modern admin interface.
+
+**The Fix:**
+Replaced aggressive "disable" approach with the proper "mark as complete" approach:
+
+1. **Mark onboarding as skipped** (the key setting!):
+   ```php
+   update_option('woocommerce_onboarding_profile', ['skipped' => true]);
+   ```
+
+2. **Mark task lists as complete**:
+   ```php
+   update_option('woocommerce_task_list_complete', 'yes');
+   update_option('woocommerce_task_list_hidden', 'yes');
+   update_option('woocommerce_task_list_welcome_modal_dismissed', 'yes');
+   ```
+
+3. **Use safe filters only**:
+   ```php
+   add_filter('woocommerce_prevent_automatic_wizard_redirect', '__return_true');
+   add_filter('woocommerce_allow_marketplace_suggestions', '__return_false');
+   ```
+
+**Research References:**
+- https://stackoverflow.com/questions/62775999/how-to-disable-woocommerce-setup-wizard
+- https://randomadult.com/disable-woocommerce-setup-wizard/
+- https://developer.woocommerce.com/docs/
+
+**Why WooCommerce Wizard is Hard to Disable:**
+WooCommerce intentionally makes the setup wizard difficult to skip because:
+- Automattic uses it to funnel users toward paid services (WooCommerce Payments, Jetpack)
+- The wizard collects store data for their analytics
+- There's no simple `woocommerce_disable_wizard` option by design
+- Multiple conditions can resurrect the wizard after dismissal
+
+**Safe Filters (use these):**
+- `woocommerce_prevent_automatic_wizard_redirect`
+- `woocommerce_allow_marketplace_suggestions`
+- `woocommerce_helper_suppress_admin_notices`
+- `woocommerce_show_admin_notice`
+
+**Dangerous Filters (DO NOT use):**
+- `woocommerce_admin_disabled` - Breaks WC admin access completely
+- `woocommerce_admin_features` returning empty - Breaks admin features
+
+---
+
+## Version 2.1.1 - November 27, 2025
+
+### Minor Update
+- Version bump for testing
+
+---
+
+## Version 2.1.0 - November 26, 2025
+
+### 🎉 Major Release - Simplified & Fixed
+
+**New Catalog Images**
+- ✅ Replaced all old broken images with new squared/matted catalog images
+- ✅ All 196 product images now properly formatted and uploaded to GitHub
+- ✅ Images accessible from public repository without authentication
+
+**Removed GitHub Configuration**
+- ✅ Deleted entire "GitHub Configuration" section from admin UI
+- ✅ No token input needed - plugin works immediately after installation
+- ✅ Simplified user experience - just click "Import Catalog Now"
+
+**Fixed Authentication Issues**
+- ✅ Plugin no longer sends authentication headers for public repository
+- ✅ Fixed "Bad credentials" error (HTTP 401)
+- ✅ Images download directly from raw.githubusercontent.com without API calls
+
+**Technical Improvements**
+- Updated image download to use direct raw URLs (no API conversion needed)
+- Removed unnecessary authentication logic
+- Cleaner, simpler codebase
+
+---
+
 ## Version 2.0.3 - November 26, 2025
 
 ### 🔧 Bug Fix

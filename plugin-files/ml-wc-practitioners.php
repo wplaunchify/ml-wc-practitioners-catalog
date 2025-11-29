@@ -3,7 +3,7 @@
  * Plugin Name: ML WooCommerce Practitioners Catalog
  * Plugin URI: https://github.com/wplaunchify/ml-stuarthoover
  * Description: Import Professional Nutritionals catalog from GitHub repository to WooCommerce. One-click import of 196+ products with images, descriptions, and pricing.
- * Version: 2.1.0
+ * Version: 2.1.4
  * Author: Spencer Forman
  * Author URI: https://minutelaunch.ai
  * License: GPL v2 or later
@@ -27,7 +27,7 @@ add_action('before_woocommerce_init', function() {
 });
 
 // Define plugin constants
-define('ML_WC_PRACTITIONERS_VERSION', '2.1.0');
+define('ML_WC_PRACTITIONERS_VERSION', '2.1.4');
 define('ML_WC_PRACTITIONERS_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('ML_WC_PRACTITIONERS_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('ML_WC_PRACTITIONERS_GITHUB_REPO', 'wplaunchify/ml-wc-practitioners-catalog');
@@ -145,30 +145,90 @@ class ML_WC_Practitioners_Catalog {
     }
     
     /**
-     * Check if WooCommerce is active and keep wizard killed
+     * Check if WooCommerce is active and properly mark setup wizard as complete
+     * 
+     * IMPORTANT: Do NOT use these filters as they break WooCommerce admin access:
+     *   - woocommerce_admin_disabled (completely disables WC admin React app)
+     *   - woocommerce_admin_features returning empty array
+     * 
+     * Instead, we mark the wizard as "completed" using WooCommerce's own options.
+     * This is the proper, supported way to skip the wizard.
+     * 
+     * References:
+     *   - https://developer.woocommerce.com/docs/
+     *   - https://stackoverflow.com/questions/62775999/how-to-disable-woocommerce-setup-wizard
+     *   - https://randomadult.com/disable-woocommerce-setup-wizard/
      */
     public function check_and_setup_woocommerce() {
-        // If WooCommerce is active, make sure wizard stays dead
+        // If WooCommerce is active, properly mark wizard as complete
         if (class_exists('WooCommerce')) {
-            // Kill wizard on every page load (in case WC tries to resurrect it)
-            delete_transient('_wc_activation_redirect');
-            update_option('woocommerce_task_list_hidden', 'yes');
-            update_option('woocommerce_onboarding_opt_in', 'no');
             
-            // Kill WooCommerce admin notices with filters (not remove_all_actions)
-            add_filter('woocommerce_admin_disabled', '__return_true');
-            add_filter('woocommerce_admin_features', '__return_empty_array');
+            // =====================================================================
+            // STEP 1: Mark onboarding profile as "skipped" (the key setting!)
+            // This tells WooCommerce the user intentionally skipped the wizard
+            // =====================================================================
+            update_option('woocommerce_onboarding_profile', ['skipped' => true]);
+            
+            // =====================================================================
+            // STEP 2: Mark all task lists as complete and hidden
+            // These control the "finish setup" nags in WC admin
+            // =====================================================================
+            update_option('woocommerce_task_list_complete', 'yes');
+            update_option('woocommerce_task_list_hidden', 'yes');
+            update_option('woocommerce_extended_task_list_hidden', 'yes');
+            update_option('woocommerce_task_list_welcome_modal_dismissed', 'yes');
+            
+            // =====================================================================
+            // STEP 3: Disable onboarding opt-in and prevent wizard redirect
+            // =====================================================================
+            update_option('woocommerce_onboarding_opt_in', 'no');
+            delete_transient('_wc_activation_redirect');
+            
+            // =====================================================================
+            // STEP 4: Use proper filters (these are SAFE and don't break admin)
+            // =====================================================================
+            
+            // Prevent automatic wizard redirect on activation
+            add_filter('woocommerce_prevent_automatic_wizard_redirect', '__return_true');
+            
+            // Disable marketplace suggestions (upsells)
+            add_filter('woocommerce_allow_marketplace_suggestions', '__return_false');
+            
+            // Suppress helper connection notices
             add_filter('woocommerce_helper_suppress_admin_notices', '__return_true');
+            
+            // Hide generic admin notices from WC
             add_filter('woocommerce_show_admin_notice', '__return_false');
             
-            // Hide specific WC notices
+            // =====================================================================
+            // STEP 5: Disable specific onboarding features (not all admin features!)
+            // =====================================================================
+            add_filter('woocommerce_admin_get_feature_config', function($features) {
+                // Only disable onboarding-related features, keep everything else
+                $disable = ['onboarding', 'onboarding-tasks', 'homescreen'];
+                foreach ($disable as $feature) {
+                    if (isset($features[$feature])) {
+                        $features[$feature] = false;
+                    }
+                }
+                return $features;
+            });
+            
+            // =====================================================================
+            // STEP 6: CSS fallback to hide any remaining wizard UI elements
+            // This is cosmetic backup only - the options above do the real work
+            // =====================================================================
             add_action('admin_head', function() {
                 echo '<style>
-                    .woocommerce-message,
-                    .woocommerce-error,
-                    .woocommerce-info,
-                    .wc-admin-notice,
-                    div.notice.woocommerce-message {
+                    /* Hide WooCommerce setup wizard and onboarding UI */
+                    .woocommerce-profile-wizard,
+                    .woocommerce-task-list,
+                    .woocommerce-homescreen,
+                    .woocommerce-layout__header-tasks-reminder-bar,
+                    .woocommerce-onboarding-homepage-notice,
+                    .woocommerce-task-card,
+                    .woocommerce-welcome-modal,
+                    div.notice.woocommerce-message.woocommerce-tracker {
                         display: none !important;
                     }
                 </style>';
@@ -816,13 +876,61 @@ class ML_WC_Practitioners_Catalog {
             return ['error' => 'GitHub API error: HTTP ' . $response_code . ' - ' . substr($body, 0, 200)];
         }
         
-        $data = json_decode($body, true);
+        // Parse CSV data
+        $products = $this->parse_csv($body);
         
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            return ['error' => 'Invalid JSON response from GitHub. Error: ' . json_last_error_msg() . ' | First 200 chars: ' . substr($body, 0, 200)];
+        if (empty($products)) {
+            return ['error' => 'No products found in CSV file'];
         }
         
-        return $data;
+        return ['products' => $products];
+    }
+    
+    /**
+     * Parse CSV data into products array
+     */
+    private function parse_csv($csv_data) {
+        $lines = explode("\n", $csv_data);
+        $products = [];
+        $headers = [];
+        
+        foreach ($lines as $index => $line) {
+            $line = trim($line);
+            if (empty($line)) continue;
+            
+            // Parse CSV line (handle quoted fields with commas)
+            $fields = str_getcsv($line);
+            
+            if ($index === 0) {
+                // First line is headers
+                $headers = $fields;
+                continue;
+            }
+            
+            // Map fields to product data
+            if (count($fields) >= 16) {
+                $products[] = [
+                    'stock_code' => $fields[0],
+                    'product_name' => $fields[1],
+                    'wholesale_price' => $fields[2],
+                    'retail_price' => $fields[3],
+                    'profit' => $fields[4],
+                    'image_url' => $fields[5],
+                    'image_preview' => $fields[6],
+                    'category' => $fields[7],
+                    'form' => $fields[8],
+                    'count' => $fields[9],
+                    'description' => $fields[10],
+                    'ingredients' => $fields[11],
+                    'benefits' => $fields[12],
+                    'directions' => $fields[13],
+                    'warnings' => $fields[14],
+                    'pn_sku' => $fields[15]
+                ];
+            }
+        }
+        
+        return $products;
     }
     
     /**
@@ -1466,33 +1574,62 @@ class ML_WC_Practitioners_Catalog {
     }
     
     /**
-     * Kill the WooCommerce setup wizard completely
+     * Mark WooCommerce setup wizard as complete (proper method)
+     * 
+     * IMPORTANT: This uses the CORRECT approach - marking wizard as "complete"
+     * rather than trying to disable WooCommerce admin features.
+     * 
+     * DO NOT USE these filters (they break WC admin access):
+     *   - woocommerce_admin_disabled
+     *   - woocommerce_admin_features returning empty array
+     * 
+     * References:
+     *   - https://stackoverflow.com/questions/62775999/how-to-disable-woocommerce-setup-wizard
+     *   - https://randomadult.com/disable-woocommerce-setup-wizard/
      */
     private static function kill_woocommerce_wizard() {
-        // Disable ALL WooCommerce onboarding
-        update_option('woocommerce_onboarding_opt_in', 'no');
-        update_option('woocommerce_task_list_hidden', 'yes');
+        // =====================================================================
+        // THE KEY SETTING: Mark onboarding profile as "skipped"
+        // This is what WooCommerce checks to determine if wizard should show
+        // =====================================================================
+        update_option('woocommerce_onboarding_profile', ['skipped' => true]);
+        
+        // =====================================================================
+        // Mark all task lists as complete and hidden
+        // =====================================================================
         update_option('woocommerce_task_list_complete', 'yes');
+        update_option('woocommerce_task_list_hidden', 'yes');
         update_option('woocommerce_extended_task_list_hidden', 'yes');
+        update_option('woocommerce_task_list_welcome_modal_dismissed', 'yes');
         update_option('woocommerce_task_list_tracked_completed_tasks', []);
         
-        // Kill setup wizard redirect
+        // =====================================================================
+        // Disable onboarding opt-in and wizard redirect
+        // =====================================================================
+        update_option('woocommerce_onboarding_opt_in', 'no');
         delete_transient('_wc_activation_redirect');
         delete_option('woocommerce_admin_install_timestamp');
         
-        // Disable marketplace suggestions
+        // =====================================================================
+        // Disable marketplace suggestions and notifications
+        // =====================================================================
         update_option('woocommerce_show_marketplace_suggestions', 'no');
         update_option('woocommerce_merchant_email_notifications', 'no');
+        update_option('woocommerce_allow_marketplace_suggestions', 'no');
         
-        // Mark as already set up (fake it)
+        // Mark as already set up (backdate install timestamp)
         update_option('woocommerce_admin_install_timestamp', time() - (30 * DAY_IN_SECONDS));
         
-        // CRITICAL: Force store LIVE (disable "Coming Soon" mode)
+        // =====================================================================
+        // Force store LIVE (disable "Coming Soon" mode)
+        // =====================================================================
         update_option('woocommerce_coming_soon', 'no');
         update_option('woocommerce_store_pages_only', 'no');
         update_option('woocommerce_private_link', '');
         
-        // Set basic defaults
+        // =====================================================================
+        // Set sensible store defaults
+        // =====================================================================
         update_option('woocommerce_store_address', '');
         update_option('woocommerce_store_city', '');
         update_option('woocommerce_default_country', 'US');
@@ -1501,7 +1638,7 @@ class ML_WC_Practitioners_Catalog {
         update_option('woocommerce_product_type', 'both');
         update_option('woocommerce_sell_in_person', 'no');
         
-        // Disable WooCommerce admin features
+        // Disable analytics (optional, reduces overhead)
         update_option('woocommerce_analytics_enabled', 'no');
         update_option('woocommerce_remote_variant_assignment', 'no');
     }
