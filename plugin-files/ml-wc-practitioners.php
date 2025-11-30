@@ -3,7 +3,7 @@
  * Plugin Name: ML WooCommerce Practitioners Catalog
  * Plugin URI: https://github.com/wplaunchify/ml-stuarthoover
  * Description: Import Professional Nutritionals catalog from GitHub repository to WooCommerce. One-click import of 196+ products with images, descriptions, and pricing.
- * Version: 2.1.4
+ * Version: 2.2.1
  * Author: Spencer Forman
  * Author URI: https://minutelaunch.ai
  * License: GPL v2 or later
@@ -27,7 +27,9 @@ add_action('before_woocommerce_init', function() {
 });
 
 // Define plugin constants
-define('ML_WC_PRACTITIONERS_VERSION', '2.1.4');
+define('ML_WC_PRACTITIONERS_VERSION', '2.2.1');
+define('ML_WC_PRACTITIONERS_IMAGES_ZIP_URL', 'https://raw.githubusercontent.com/wplaunchify/ml-wc-practitioners-catalog/main/catalog/images.zip');
+define('ML_WC_PRACTITIONERS_IMAGES_DIR', 'pn-product-images');
 define('ML_WC_PRACTITIONERS_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('ML_WC_PRACTITIONERS_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('ML_WC_PRACTITIONERS_GITHUB_REPO', 'wplaunchify/ml-wc-practitioners-catalog');
@@ -139,6 +141,10 @@ class ML_WC_Practitioners_Catalog {
         add_action('wp_ajax_ml_practitioners_get_import_status', [$this, 'ajax_get_import_status']);
         add_action('wp_ajax_ml_practitioners_reset_catalog', [$this, 'ajax_reset_catalog']);
         add_action('wp_ajax_ml_practitioners_go_live', [$this, 'ajax_go_live']);
+        add_action('wp_ajax_ml_practitioners_download_images', [$this, 'ajax_download_images']);
+        
+        // Disable WordPress thumbnail generation for imported images (keep only original 500x500)
+        add_filter('intermediate_image_sizes_advanced', [$this, 'disable_extra_image_sizes']);
         
         // Initialization
         add_action('admin_init', [$this, 'check_and_setup_woocommerce']);
@@ -934,7 +940,105 @@ class ML_WC_Practitioners_Catalog {
     }
     
     /**
-     * Download image from GitHub with authentication
+     * Download and extract images.zip from GitHub (one-time download)
+     * This downloads all 199 product images in a single ZIP file instead of 199 individual requests.
+     * 
+     * @return array ['success' => bool, 'message' => string, 'images_dir' => string]
+     */
+    private function download_and_extract_images_zip() {
+        $upload_dir = wp_upload_dir();
+        $images_dir = $upload_dir['basedir'] . '/' . ML_WC_PRACTITIONERS_IMAGES_DIR;
+        
+        // Check if images already downloaded
+        if (is_dir($images_dir) && count(glob($images_dir . '/*.png')) > 100) {
+            $this->log('Images already downloaded to: ' . $images_dir);
+            return ['success' => true, 'message' => 'Images already available', 'images_dir' => $images_dir];
+        }
+        
+        $this->log('Downloading images.zip from GitHub...');
+        
+        // Download the ZIP file
+        $response = wp_remote_get(ML_WC_PRACTITIONERS_IMAGES_ZIP_URL, [
+            'timeout' => 120,  // 2 minutes for 29MB file
+            'stream' => false
+        ]);
+        
+        if (is_wp_error($response)) {
+            $this->log('Failed to download images.zip: ' . $response->get_error_message());
+            return ['success' => false, 'message' => $response->get_error_message()];
+        }
+        
+        $response_code = wp_remote_retrieve_response_code($response);
+        if ($response_code !== 200) {
+            $this->log('images.zip download failed: HTTP ' . $response_code);
+            return ['success' => false, 'message' => 'HTTP ' . $response_code];
+        }
+        
+        $zip_content = wp_remote_retrieve_body($response);
+        $this->log('Downloaded images.zip: ' . strlen($zip_content) . ' bytes');
+        
+        // Verify it's a valid ZIP
+        if (substr($zip_content, 0, 2) !== 'PK') {
+            $this->log('Downloaded file is not a valid ZIP');
+            return ['success' => false, 'message' => 'Invalid ZIP file'];
+        }
+        
+        // Save to temp file
+        $temp_zip = $upload_dir['basedir'] . '/pn-images-temp.zip';
+        if (!file_put_contents($temp_zip, $zip_content)) {
+            $this->log('Failed to save temp ZIP file');
+            return ['success' => false, 'message' => 'Could not save ZIP file'];
+        }
+        
+        $this->log('Saved temp ZIP: ' . $temp_zip);
+        
+        // Create images directory
+        if (!is_dir($images_dir)) {
+            wp_mkdir_p($images_dir);
+        }
+        
+        // Extract using WordPress unzip_file
+        WP_Filesystem();
+        $result = unzip_file($temp_zip, $images_dir);
+        
+        // Clean up temp file
+        @unlink($temp_zip);
+        
+        if (is_wp_error($result)) {
+            $this->log('Failed to extract images.zip: ' . $result->get_error_message());
+            return ['success' => false, 'message' => $result->get_error_message()];
+        }
+        
+        // Count extracted images
+        $image_count = count(glob($images_dir . '/*.png'));
+        $this->log('Extracted ' . $image_count . ' images to: ' . $images_dir);
+        
+        return ['success' => true, 'message' => 'Extracted ' . $image_count . ' images', 'images_dir' => $images_dir];
+    }
+    
+    /**
+     * Get local image path for a product
+     * 
+     * @param string $image_url The original GitHub image URL
+     * @return string|false Local file path or false if not found
+     */
+    private function get_local_image_path($image_url) {
+        $upload_dir = wp_upload_dir();
+        $images_dir = $upload_dir['basedir'] . '/' . ML_WC_PRACTITIONERS_IMAGES_DIR;
+        
+        // Extract filename from URL
+        $filename = basename(parse_url($image_url, PHP_URL_PATH));
+        $local_path = $images_dir . '/' . $filename;
+        
+        if (file_exists($local_path)) {
+            return $local_path;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Download image from GitHub with authentication (LEGACY - kept for fallback)
      */
     private function download_image_from_github($image_url) {
         $this->log('Downloading image from: ' . $image_url);
@@ -1174,26 +1278,42 @@ class ML_WC_Practitioners_Catalog {
  */
 
     /**
-     * Download image from GitHub and attach to product
+     * Attach product image - uses local images from extracted ZIP (fast!)
+     * Falls back to GitHub download if local image not found.
      */
     private function attach_product_image($product_id, $image_url, $product_name) {
-        // Download image from GitHub
-        $this->log('download_image_from_github called for: ' . $image_url);
-        $image_result = $this->download_image_from_github($image_url);
-        
-        if (isset($image_result['error'])) {
-            $this->log('download_image_from_github returned error: ' . $image_result['error']);
-            return ['error' => $image_result['error']];
-        }
-        
-        $this->log('Image downloaded, size: ' . strlen($image_result['data']) . ' bytes');
-        
         // Get filename from URL
         $filename = basename(parse_url($image_url, PHP_URL_PATH));
-        $this->log('Filename: ' . $filename);
+        $this->log('Processing image: ' . $filename);
         
-        // Upload to WordPress
-        $upload = wp_upload_bits($filename, null, $image_result['data']);
+        // Try to get local image first (from extracted images.zip)
+        $local_path = $this->get_local_image_path($image_url);
+        
+        if ($local_path) {
+            $this->log('Using local image: ' . $local_path);
+            $image_data = file_get_contents($local_path);
+            
+            if ($image_data === false) {
+                $this->log('Failed to read local image file');
+                return ['error' => 'Failed to read local image'];
+            }
+        } else {
+            // Fallback: Download from GitHub (slow)
+            $this->log('Local image not found, downloading from GitHub: ' . $image_url);
+            $image_result = $this->download_image_from_github($image_url);
+            
+            if (isset($image_result['error'])) {
+                $this->log('download_image_from_github returned error: ' . $image_result['error']);
+                return ['error' => $image_result['error']];
+            }
+            
+            $image_data = $image_result['data'];
+        }
+        
+        $this->log('Image data size: ' . strlen($image_data) . ' bytes');
+        
+        // Upload to WordPress media library
+        $upload = wp_upload_bits($filename, null, $image_data);
         
         if ($upload['error']) {
             $this->log('wp_upload_bits error: ' . $upload['error']);
@@ -1357,8 +1477,23 @@ class ML_WC_Practitioners_Catalog {
             wp_send_json_error(['message' => 'Insufficient permissions']);
         }
         
+        // Set flag to disable thumbnail generation during import
+        define('ML_PRACTITIONERS_IMPORTING', true);
+        
         $offset = isset($_POST['offset']) ? intval($_POST['offset']) : 0;
         $batch_size = isset($_POST['batch_size']) ? intval($_POST['batch_size']) : 20;
+        
+        // On first batch, download images.zip if not already done
+        if ($offset === 0) {
+            $this->log('First batch - checking images.zip...');
+            $images_result = $this->download_and_extract_images_zip();
+            if (!$images_result['success']) {
+                $this->log('Warning: Could not download images.zip: ' . $images_result['message']);
+                // Continue anyway - will fall back to individual downloads
+            } else {
+                $this->log('Images ready: ' . $images_result['message']);
+            }
+        }
         
         // Fetch catalog
         $catalog = $this->fetch_catalog_from_github();
@@ -1494,6 +1629,44 @@ class ML_WC_Practitioners_Catalog {
         wp_send_json_success([
             'message' => 'Store is now LIVE! Customers can see your products.'
         ]);
+    }
+    
+    /**
+     * AJAX: Download and extract images.zip (one-time operation)
+     */
+    public function ajax_download_images() {
+        check_ajax_referer('ml_practitioners_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => 'Insufficient permissions']);
+        }
+        
+        // Increase timeout for large download
+        set_time_limit(300);
+        
+        $result = $this->download_and_extract_images_zip();
+        
+        if ($result['success']) {
+            wp_send_json_success([
+                'message' => $result['message'],
+                'images_dir' => $result['images_dir']
+            ]);
+        } else {
+            wp_send_json_error(['message' => $result['message']]);
+        }
+    }
+    
+    /**
+     * Disable WordPress automatic thumbnail generation for product images.
+     * We only need the original 500x500 size, not multiple thumbnails.
+     * This speeds up import and saves disk space.
+     */
+    public function disable_extra_image_sizes($sizes) {
+        // Only disable during our import process
+        if (defined('ML_PRACTITIONERS_IMPORTING') && ML_PRACTITIONERS_IMPORTING) {
+            return []; // Return empty array = no thumbnails generated
+        }
+        return $sizes;
     }
 
 /**

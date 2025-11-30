@@ -1,5 +1,61 @@
 # Changelog - ML WooCommerce Practitioners
 
+## Version 2.2.1 - November 30, 2025
+
+### 🎨 Image Reconciliation - All Products Now Show YOUR LOGO
+
+**Problem:**
+Some products were showing incorrect images or missing images due to inconsistent image references in the CSV.
+
+**Solution:**
+- Reconciled all 236 images from ml-stuarthoover repository
+- Updated `images.zip` with complete image set (81.5 MB, 236 images)
+- Verified all 196 products have correct image references in CSV
+- All products now display "YOUR LOGO" placeholder branding (green heart + YOUR LOGO text)
+
+**Changes:**
+- ✅ All 196 products verified with matching images
+- ✅ Updated images.zip: 194 composite + 42 original images
+- ✅ CSV image URLs corrected to reference proper files
+- ✅ No more "Professional Nutritionals" branding - all YOUR LOGO placeholders
+
+**Image Details:**
+- Total images: 236 PNG files (500x500 pixels)
+- Composite images: 194 (with YOUR LOGO branding)
+- Original images: 42 (with YOUR LOGO branding)
+- All images: White background, professional studio lighting
+
+---
+
+## Version 2.2.0 - November 29, 2025
+
+### 🚀 Major Performance Improvement - Bundled Images
+
+**Problem:**
+Import was taking 30+ minutes because it downloaded 196 images individually from GitHub, with each request potentially timing out.
+
+**Solution:**
+Images are now bundled into a single `images.zip` file (29MB) that downloads once and extracts locally.
+
+**New Features:**
+- Single ZIP download for all 199 product images
+- Images extracted to `wp-content/uploads/pn-product-images/`
+- Import now uses local images (instant, no network requests)
+- Automatic fallback to GitHub if local image not found
+- Disabled WordPress thumbnail generation during import (saves time and disk space)
+
+**Technical Details:**
+- `images.zip` hosted on GitHub: `catalog/images.zip`
+- Download URL: `https://raw.githubusercontent.com/wplaunchify/ml-wc-practitioners-catalog/main/catalog/images.zip`
+- Images are 500x500 PNG, optimized (29MB total)
+- Uses WordPress `unzip_file()` for extraction (same pattern as LaunchKit)
+
+**Import Time:**
+- Before: 30+ minutes (196 individual HTTP requests)
+- After: ~2-3 minutes (1 ZIP download + local file operations)
+
+---
+
 ## Version 2.1.3 - November 29, 2025
 
 ### 🔧 Critical Bug Fix - WooCommerce Admin Access Restored
